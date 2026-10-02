@@ -1,0 +1,30 @@
+{
+  "name": "texlyre-live-sync",
+  "version": "2.0.0",
+  "description": "Echtzeit-Synchronisation des gesamten TeXlyre-Projektordners (WebRTC) mit einem lokalen LaTeX-Projekt",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js",
+    "sync": "node sync.js",
+    "sync:visible": "node sync.js --visible",
+    "install:browser": "puppeteer browsers install chrome"
+  },
+  "puppeteer": {
+    "skipDownload": true
+  },
+  "keywords": [
+    "texlyre",
+    "latex",
+    "typst",
+    "live-sync",
+    "yjs",
+    "webrtc",
+    "vscode",
+    "antigravity"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer": "^25.12.0"
+  }
+}

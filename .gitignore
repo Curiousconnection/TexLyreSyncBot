@@ -1,0 +1,15 @@
+# Abhängigkeiten
+node_modules/
+
+# Browser-Profil des Sync-Bots
+.texlyre_profile/
+.texlyre_profile*/
+
+# Projekt-/Testdateien und Ausgaben
+output/
+*.tex
+*.log
+*.zip
+*.pdf
+*.aux
+*.synctex.gz
