@@ -566,6 +566,8 @@ function installPageLibrary(projectId) {
     const INTERNAL_PREFIXES = ['/.texlyre_cache/', '/.texlyre_src/'];
 
     let cachedDb = null;
+    /** Dokument-ID -> Pfad der verknüpften Datei (wird von listFiles() gepflegt). */
+    const docPathById = new Map();
 
     async function openDb() {
         if (cachedDb) return cachedDb;
@@ -672,7 +674,13 @@ function installPageLibrary(projectId) {
         const records = await Promise.all(
             candidates.map(c => reqToPromise(store.get(c.id)).catch(() => null))
         );
-        return records.filter(Boolean).map(rec => ({
+        const files = records.filter(Boolean);
+        // Zuordnung Dokument-ID -> Pfad für boundPath() aktuell halten
+        docPathById.clear();
+        for (const rec of files) {
+            if (rec.documentId && !rec.isDeleted) docPathById.set(rec.documentId, rec.path);
+        }
+        return files.map(rec => ({
             id: rec.id,
             path: rec.path,
             name: rec.name,
@@ -734,6 +742,10 @@ function installPageLibrary(projectId) {
 
     /** Pfad der Datei, die aktuell im Editor geöffnet ist. */
     function activePath() {
+        // Verlässlichste Quelle: das tatsächlich gebundene Yjs-Dokument
+        // (siehe boundPath). Die Heuristiken unten nur als Rückfallebene.
+        const bound = boundPath();
+        if (bound) return bound;
         // TeXlyre zeigt den Pfad des verknüpften Dokuments im Editor-Header an.
         const el = document.querySelector('.linked-filepath, .filepath-info, [class*="filepath"]');
         if (el) {
@@ -759,6 +771,81 @@ function installPageLibrary(projectId) {
             }
         } catch (e) {}
         return null;
+    }
+
+    // ---------- Gebundenes Dokument (Yjs) ----------
+    //
+    // activePath() liest den Editor-Header. Der springt beim Dokumentwechsel
+    // aber FRÜHER auf die neue Datei, als der Editor deren Inhalt zeigt. Wer
+    // sich darauf verlässt, schreibt kurzzeitig den Text der alten Datei unter
+    // dem Namen der neuen weg. Verlässlich ist nur das Yjs-Dokument, an das
+    // der Editor tatsächlich gebunden ist: dessen WebRTC-Provider heißt
+    // "<projekt>-yjs_<dokumentId>".
+
+    const docIdByYDoc = new WeakMap();
+    let boundYDocSeen = null;           // zuletzt gesehenes Yjs-Dokument im Editor
+    let boundSince = 0;                 // seit wann es gebunden ist
+    let bindingDetectable = false;      // wurde die Bindung schon einmal erkannt?
+
+    /** Das Y.Doc, an das der Editor über y-codemirror gebunden ist. */
+    function boundYDoc() {
+        const view = editorView();
+        if (!view || !Array.isArray(view.plugins)) return null;
+        for (const plugin of view.plugins) {
+            const v = plugin && plugin.value;
+            if (!v) continue;
+            const ytext = v._ytext || (v.conf && v.conf.ytext);
+            if (ytext && ytext.doc) return ytext.doc;
+        }
+        return null;
+    }
+
+    /** Sucht in den React-Hooks über dem Editor den Provider, der zu diesem Y.Doc gehört. */
+    function providerRoomFor(ydoc) {
+        let el = document.querySelector('.cm-editor');
+        let fiber = null;
+        while (el && !(fiber = fiberOf(el))) el = el.parentElement;
+        for (let i = 0; i < 20 && fiber; i++, fiber = fiber.return) {
+            let hook = fiber.memoizedState;
+            for (let j = 0; j < 80 && hook && typeof hook === 'object'; j++, hook = hook.next) {
+                const s = hook.memoizedState;
+                for (const c of [s, s && s.current]) {
+                    if (c && typeof c === 'object' && c.doc === ydoc && typeof c.roomName === 'string') {
+                        return c.roomName;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Dokument-ID des tatsächlich gebundenen Yjs-Dokuments (oder null). */
+    function boundDocumentId() {
+        const ydoc = boundYDoc();
+        if (!ydoc) return null;
+        if (ydoc !== boundYDocSeen) {
+            boundYDocSeen = ydoc;
+            boundSince = Date.now();
+        }
+        if (docIdByYDoc.has(ydoc)) return docIdByYDoc.get(ydoc);
+        const room = providerRoomFor(ydoc);
+        const m = room && room.match(/-yjs_([^/\s]+)$/);
+        if (!m) return null;
+        docIdByYDoc.set(ydoc, m[1]);
+        bindingDetectable = true;
+        return m[1];
+    }
+
+    /** Pfad der Datei, deren Inhalt der Editor WIRKLICH zeigt (oder null). */
+    function boundPath() {
+        const id = boundDocumentId();
+        return id ? (docPathById.get(id) || null) : null;
+    }
+
+    /** Wie lange (ms) der Editor schon an dasselbe Yjs-Dokument gebunden ist. */
+    function boundForMs() {
+        boundDocumentId();
+        return boundYDocSeen ? Date.now() - boundSince : 0;
     }
 
     // ---------- React-Fiber-Zugriff auf den Dateibaum ----------
@@ -1004,7 +1091,30 @@ function installPageLibrary(projectId) {
         if (!view || !view.state || !view.state.doc) return false;
         const rec = await readFile(texPath);
         if (!rec || rec.kind !== 'text') return false;
-        return norm(view.state.doc.toString()) === norm(rec.text);
+        return bindingReady(texPath, view.state.doc.toString(), rec.text);
+    }
+
+    /**
+     * Synchrone Bereitschaftsprüfung (ohne await, damit zwischen Prüfung und
+     * Schreiben kein Dokumentwechsel dazwischenkommen kann).
+     *
+     * Ist die Yjs-Bindung erkennbar, muss sie auf texPath zeigen. Dann gilt der
+     * Editor als fertig geladen, sobald er den gespeicherten Stand zeigt ODER
+     * seit einigen Sekunden an dasselbe Dokument gebunden ist (Mitautoren
+     * können ungespeicherte Änderungen haben – dann wartet der reine
+     * Inhaltsvergleich sonst vergeblich).
+     */
+    function bindingReady(texPath, editorTextNow, storedText) {
+        const sameAsStored = norm(editorTextNow) === norm(storedText);
+        const bound = boundPath();
+        if (bound) {
+            if (bound !== texPath) return false;
+            return sameAsStored || boundForMs() > 2500;
+        }
+        // Bindung (noch) nicht erkennbar: während eines Wechsels nie schreiben;
+        // nur wenn sie nie erkennbar war, auf den alten Inhaltsvergleich zurückfallen.
+        if (bindingDetectable) return false;
+        return sameAsStored;
     }
 
     /**
@@ -1033,7 +1143,9 @@ function installPageLibrary(projectId) {
         }
 
         const oldText = view.state.doc.toString();
-        if (norm(oldText) !== norm(rec.text)) {
+        if (!bindingReady(expectedPath, oldText, rec.text)) {
+            const bound = boundPath();
+            if (bound && bound !== expectedPath) return { ok: false, reason: 'wrong-document', active: bound };
             return { ok: false, reason: 'editor-not-in-sync' };
         }
 
@@ -1156,6 +1268,8 @@ function installPageLibrary(projectId) {
         listFiles: listFiles,
         readFile: readFile,
         activePath: activePath,
+        boundPath: boundPath,
+        bindingDetectable: () => bindingDetectable,
         editorText: editorText,
         editorReadyFor: editorReadyFor,
         selectFile: selectFile,
@@ -1473,16 +1587,30 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
 
     // --- Warten auf CodeMirror Editor ---
     log('⏳', '[EDITOR]', 'Warte auf CodeMirror 6 Editor-Instanz...', colors.cyan);
+    // Ein frisch angelegtes TeXlyre-Projekt hat noch keine Dateien und damit
+    // auch keinen Editor. Das ist kein Fehler: Dateien kommen später per
+    // Abgleich von den Mitautoren oder werden mit 'new <datei>' angelegt.
+    let projectEmpty = false;
     try {
-        // Erst warten, bis entweder der Editor (.cm-content) oder der Dateibaum (.file-node) geladen ist
+        // Erst warten, bis entweder der Editor (.cm-content), der Dateibaum (.file-node)
+        // oder der leere Dateibaum eines neuen Projekts geladen ist
         await page.waitForFunction(() => {
             return !!document.querySelector('.cm-content, .cm-editor, [contenteditable="true"]') ||
                 !!document.querySelector('.file-node') ||
+                !!document.querySelector('.file-tree .empty-state') ||
                 Array.from(document.querySelectorAll('button')).some(button => /^open$/i.test((button.innerText || '').trim()));
         }, { timeout: 35000 });
 
         let hasEditor = await page.evaluate(() => !!document.querySelector('.cm-content, .cm-editor, [contenteditable="true"]'));
         if (!hasEditor) {
+            // Dem Dateibaum kurz Zeit geben, bevor "leer" angenommen wird
+            await page.waitForSelector('.file-node', { timeout: 5000 }).catch(() => {});
+            projectEmpty = await page.evaluate(() =>
+                !document.querySelector('.file-node') && !!document.querySelector('.file-tree .empty-state'));
+        }
+        if (projectEmpty) {
+            log('📭', '[LEERES PROJEKT]', "Das Projekt hat noch keine Dateien. Lege sie in TeXlyre an oder hier mit 'new main.tex' – sie werden dann automatisch synchronisiert.", colors.yellow);
+        } else if (!hasEditor) {
             log('📂', '[DATEI]', 'Projekt geöffnet, wähle Start-Datei im Dateibaum...', colors.cyan);
             const clicked = await page.evaluate((wanted) => {
                 const nodes = Array.from(document.querySelectorAll('.file-node'));
@@ -1521,8 +1649,10 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
             }
         }
 
-        await page.waitForSelector('.cm-content, .cm-editor, [contenteditable="true"]', { timeout: 10000 });
-        log('🟢', '[EDITOR BEREIT]', 'CodeMirror 6 Editor erfolgreich verbunden!', colors.green);
+        if (!projectEmpty) {
+            await page.waitForSelector('.cm-content, .cm-editor, [contenteditable="true"]', { timeout: 10000 });
+            log('🟢', '[EDITOR BEREIT]', 'CodeMirror 6 Editor erfolgreich verbunden!', colors.green);
+        }
 
         await page.addStyleTag({
             content: `
@@ -1611,13 +1741,15 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
         process.exit(1);
     }
 
-    try {
-        await page.waitForFunction(() => {
-            const cm = document.querySelector('.cm-content');
-            return cm && cm.cmTile && cm.cmTile.view && cm.cmTile.view.state && cm.cmTile.view.state.doc;
-        }, { timeout: 35000 });
-    } catch (e) {
-        log('⚠️', '[EDITOR]', 'CodeMirror Tile View benötigte länger zum Laden, fahre fort...', colors.yellow);
+    if (!projectEmpty) {
+        try {
+            await page.waitForFunction(() => {
+                const cm = document.querySelector('.cm-content');
+                return cm && cm.cmTile && cm.cmTile.view && cm.cmTile.view.state && cm.cmTile.view.state.doc;
+            }, { timeout: 35000 });
+        } catch (e) {
+            log('⚠️', '[EDITOR]', 'CodeMirror Tile View benötigte länger zum Laden, fahre fort...', colors.yellow);
+        }
     }
 
     // --- Projekt-ID ermitteln und Hilfsbibliothek injizieren ---
@@ -1798,6 +1930,8 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
     //    b) Alle übrigen Dateien: Poll auf das TeXlyre-Dateisystem
     // =========================================================================
     let lastRemoteLogTime = 0;
+    const localDebounceTimers = new Map();  // texPath -> Timer eines anstehenden Uploads
+    const uploadsInFlight = new Set();      // texPath, deren Upload gerade läuft
 
     /**
      * Schreibt Remote-Text für einen konkreten Pfad auf die Platte.
@@ -1828,16 +1962,20 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             } catch (e) {}
         }
 
-        if (normalizeDoc(lastSynced.get(texPath)) === normRemote) {
+        const localPath = texlyrePathToLocal(texPath);
+
+        // (Auch leere Dateien lokal anlegen, solange sie noch nie abgeglichen wurden.)
+        if (lastSynced.has(texPath) && normalizeDoc(lastSynced.get(texPath)) === normRemote) {
             lastSynced.set(texPath, remoteContent);
             return;
         }
 
-        // Schreibschutz: der Nutzer hat gerade selbst lokal getippt
+        // Schreibschutz: der Nutzer hat gerade selbst lokal getippt bzw. ein
+        // Upload dieser Datei steht noch aus oder läuft gerade
         const localTs = lastLocalSave.get(texPath) || 0;
         if (Date.now() - localTs < 1500) return;
+        if (localDebounceTimers.has(texPath) || uploadsInFlight.has(texPath)) return;
 
-        const localPath = texlyrePathToLocal(texPath);
         const fileMissing = !fs.existsSync(localPath);
 
         if (!fileMissing) {
@@ -1854,6 +1992,15 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             if (!fileMissing) {
                 try {
                     const currentDisk = fs.readFileSync(localPath, 'utf8');
+                    // Lokale Fassung enthält Änderungen, die nie in TeXlyre
+                    // angekommen sind (z. B. Datei kam erst nach dem Start dazu,
+                    // wurde neu verknüpft oder ein Upload schlug fehl): TeXlyre
+                    // gewinnt, aber die lokale Fassung wird vorher gesichert.
+                    if (normalizeDoc(currentDisk) !== normalizeDoc(lastSynced.get(texPath)) &&
+                        normalizeDoc(currentDisk).length > 0) {
+                        backupLocalFile(texPath, localPath);
+                        log('🛟', '[BACKUP]', `Lokale Fassung von '${docLabel(texPath)}' wich von TeXlyre ab und wurde gesichert in ${path.relative(__dirname, backupDir)}`, colors.yellow);
+                    }
                     contentToWrite = currentDisk.includes('\r\n')
                         ? remoteContent.replace(/\r?\n/g, '\r\n')
                         : remoteContent.replace(/\r\n/g, '\n');
@@ -1886,7 +2033,10 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
     await page.evaluate((intervalMs) => {
         function checkAndPush() {
             if (!window.__TLX) return;
-            const activePath = window.__TLX.activePath();
+            // Nur das Dokument, an das der Editor wirklich gebunden ist – nicht
+            // der Header, der beim Wechsel schon auf die neue Datei zeigt,
+            // während der Editor noch den alten Text enthält.
+            const activePath = window.__TLX.boundPath();
             if (!activePath) return;
             const currentText = window.__TLX.editorText();
             if (currentText === null) return;
@@ -1931,6 +2081,10 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             clearTimeout(compileDebounce);
             compileDebounce = setTimeout(() => {
                 if (window.__TLX && !window.__TLX.isCompiling()) {
+                    // Teildateien (ohne \documentclass, per \input eingebunden)
+                    // kompilieren allein nie – das erzeugte nur Schein-Fehler.
+                    const text = window.__TLX.editorText();
+                    if (text !== null && !/\\documentclass/.test(text)) return;
                     window.__TLX.triggerCompile();
                 }
             }, 1200);
@@ -2096,7 +2250,7 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             const sel = await page.evaluate((p) => window.__TLX.selectFile(p), texPath);
             if (!sel.ok) {
                 log('⚠️', '[UPLOAD]', `Dokument '${texPath.replace(/^\//, '')}' konnte in TeXlyre nicht geöffnet werden.`, colors.yellow);
-                return;
+                return 'retry';
             }
             log('🔀', '[DOKUMENT]', `Wechsle Editor auf '${texPath.replace(/^\//, '')}'...`, colors.dim);
         }
@@ -2110,8 +2264,8 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                 texPath
             );
         } catch (e) {
-            log('⚠️', '[UPLOAD]', `'${texPath.replace(/^\//, '')}' war nicht rechtzeitig bereit – überspringe diese Änderung (sie geht beim nächsten Speichern erneut raus).`, colors.yellow);
-            return;
+            log('⚠️', '[UPLOAD]', `'${texPath.replace(/^\//, '')}' war nicht rechtzeitig bereit – neuer Versuch folgt.`, colors.yellow);
+            return 'retry';
         }
 
         lastLocalSave.set(texPath, Date.now());
@@ -2124,6 +2278,7 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
 
         if (result.ok) {
             log('📤', '[Lokal]', `${texPath.replace(/^\//, '')} (${formatSize(newLocalContent.length)})`, colors.cyan);
+            return 'ok';
         } else if (result.reason === 'wrong-document') {
             // Sicherheitsnetz: lieber nichts schreiben als ins falsche Dokument
             log('⛔', '[SCHUTZ]', `Upload abgebrochen – im Editor ist '${result.active || 'unbekannt'}' offen, erwartet wurde '${texPath}'.`, colors.yellow);
@@ -2136,9 +2291,43 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             log('⚠️', '[UPLOAD]', `Editor nicht bereit (${result.reason}).`, colors.yellow);
             lastSynced.delete(texPath);
         }
+        return 'retry';
     }
 
-    const localDebounceTimers = new Map();
+    /** Fehlgeschlagene Uploads werden wiederholt – es gibt nicht immer ein "nächstes Speichern". */
+    const uploadAttempts = new Map();      // texPath -> bisherige Fehlversuche
+    const MAX_UPLOAD_ATTEMPTS = 6;
+
+    function scheduleUpload(texPath, delayMs) {
+        clearTimeout(localDebounceTimers.get(texPath));
+        localDebounceTimers.set(texPath, setTimeout(() => {
+            localDebounceTimers.delete(texPath);
+            uploadQueue = uploadQueue
+                .then(async () => {
+                    uploadsInFlight.add(texPath);
+                    try {
+                        return await uploadLocalFile(texPath);
+                    } finally {
+                        uploadsInFlight.delete(texPath);
+                    }
+                })
+                .then((status) => {
+                    if (status !== 'retry') {
+                        uploadAttempts.delete(texPath);
+                        return;
+                    }
+                    const attempts = (uploadAttempts.get(texPath) || 0) + 1;
+                    uploadAttempts.set(texPath, attempts);
+                    if (attempts < MAX_UPLOAD_ATTEMPTS) {
+                        scheduleUpload(texPath, 1500 * attempts);
+                    } else {
+                        uploadAttempts.delete(texPath);
+                        log('❌', '[UPLOAD-FEHLER]', `'${docLabel(texPath)}' konnte nach ${attempts} Versuchen nicht übertragen werden. Die lokale Datei bleibt unverändert – speichere sie erneut, um es nochmal zu versuchen.`, colors.red);
+                    }
+                })
+                .catch(err => log('❌', '[UPLOAD-FEHLER]', `${texPath}: ${err.message}`, colors.red));
+        }, delayMs));
+    }
 
     function onLocalChange(relPath) {
         if (isScriptOwned(relPath)) return;
@@ -2146,13 +2335,18 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
         const texPath = localPathToTexlyre(relPath);
         if (!isSyncableTexlyrePath(texPath)) return;
 
-        clearTimeout(localDebounceTimers.get(texPath));
-        localDebounceTimers.set(texPath, setTimeout(() => {
-            localDebounceTimers.delete(texPath);
-            uploadQueue = uploadQueue
-                .then(() => uploadLocalFile(texPath))
-                .catch(err => log('❌', '[UPLOAD-FEHLER]', `${texPath}: ${err.message}`, colors.red));
-        }, debounceMs));
+        // Echte lokale Änderung (nicht das Echo eines Remote-Schreibvorgangs)?
+        // Dann sofort sperren, damit TeXlyre sie nicht überschreibt, bevor der
+        // Upload überhaupt dran war.
+        try {
+            const disk = fs.readFileSync(texlyrePathToLocal(texPath), 'utf8');
+            if (normalizeDoc(disk) !== normalizeDoc(lastSynced.get(texPath))) {
+                lastLocalSave.set(texPath, Date.now());
+            }
+        } catch (e) {}
+
+        uploadAttempts.delete(texPath);
+        scheduleUpload(texPath, debounceMs);
     }
 
     try {
@@ -2174,7 +2368,9 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
     // =========================================================================
     setInterval(async () => {
         try {
-            const alive = await page.evaluate(() => !!document.querySelector('.cm-content') && !!window.__TLX);
+            // Ohne geöffnetes Dokument (z. B. leeres Projekt) gibt es keinen Editor
+            const alive = await page.evaluate(() => !!window.__TLX &&
+                (!!document.querySelector('.cm-content') || !document.querySelector('.file-node')));
             if (!alive) {
                 log('⚠️', '[VERBINDUNGS-WARNUNG]', 'Editor im Browser vorübergehend nicht gefunden.', colors.yellow);
                 await ensurePageLibrary();
@@ -2807,9 +3003,11 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                 console.log(`\n${colors.cyan}${colors.bright}Synchronisierte Dateien:${colors.reset}`);
                 for (const f of list) {
                     const mark = f.path === active ? `${colors.green}●${colors.reset}` : ' ';
-                    const kind = !f.isBinary
-                        ? `${colors.green}bidirektional${colors.reset}`
-                        : `${colors.yellow}nur TeXlyre -> lokal (Binärdatei)${colors.reset}`;
+                    const kind = f.isBinary
+                        ? `${colors.yellow}nur TeXlyre -> lokal (Binärdatei)${colors.reset}`
+                        : f.documentId
+                            ? `${colors.green}bidirektional${colors.reset}`
+                            : `${colors.yellow}nur TeXlyre -> lokal (nicht verknüpft – "Link Document")${colors.reset}`;
                     console.log(`  ${mark} ${f.path.replace(/^\//, '').padEnd(28)} ${formatSize(f.size).padStart(9)}  ${kind}`);
                 }
                 console.log(`${colors.dim}  ● = aktuell im TeXlyre-Editor geöffnet${colors.reset}\n`);
