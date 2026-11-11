@@ -1219,6 +1219,58 @@ function installPageLibrary(projectId) {
         return lastCompileTarget || activePath();
     }
 
+    /**
+     * Setzt im Kompilier-Dropdown („Main File“) das Hauptdokument auf texPath.
+     * Die Einstellung gilt pro Nutzer/Browserprofil – ohne sie kompiliert der
+     * Hintergrund-Browser ein früher gemerktes Dokument (z. B. eine Vorlage).
+     */
+    async function setMainFile(texPath) {
+        const norm = (p) => (p || '').replace(/^\/+/, '');
+        const btn = compileButton();
+        const group = btn && (btn.closest('[data-trigger-group]') || btn.parentElement);
+        const toggle = group && (group.querySelector('.dropdown-toggle') ||
+            (group.parentElement && group.parentElement.querySelector('.dropdown-toggle')));
+        if (!toggle) return { ok: false, reason: 'Dropdown-Schalter nicht gefunden' };
+
+        const findSelect = () => {
+            for (const sel of document.querySelectorAll('.latex-dropdown select')) {
+                if ([...sel.options].some(o => o.value === 'auto')) return sel;
+            }
+            return null;
+        };
+        let sel = findSelect();
+        const opened = !sel;
+        if (opened) {
+            toggle.click();
+            for (let i = 0; i < 20 && !(sel = findSelect()); i++) await new Promise(r => setTimeout(r, 100));
+        }
+        if (!sel) return { ok: false, reason: 'Auswahl „Main File“ nicht gefunden' };
+
+        const option = [...sel.options].find(o => norm(o.value) === norm(texPath));
+        const before = sel.value;
+        let result;
+        if (!option) {
+            result = { ok: false, reason: 'Dokument nicht in der Auswahl', before };
+        } else if (sel.value === option.value) {
+            result = { ok: true, changed: false, before };
+        } else {
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+            setter.call(sel, option.value);
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise(r => setTimeout(r, 300));
+            const now = findSelect();
+            result = { ok: !now || now.value === option.value, changed: true, before };
+        }
+        if (opened && findSelect()) toggle.click();
+        // Nach dem Umstellen ist der Button kurz gesperrt
+        for (let i = 0; i < 50; i++) {
+            const b = compileButton();
+            if (b && !b.disabled) break;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        return result;
+    }
+
     /** Listet die Ausgabedateien (PDF/Log) aus dem TeXlyre-Dateisystem. */
     async function listOutputs() {
         const db = await openDb();
@@ -1278,6 +1330,7 @@ function installPageLibrary(projectId) {
         writeToEditor: writeToEditor,
         triggerCompile: triggerCompile,
         compileTarget: compileTarget,
+        setMainFile: setMainFile,
         isCompiling: isCompiling,
         listOutputs: listOutputs,
         readOutput: readOutput
@@ -2609,6 +2662,7 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
         // Uploads, damit kein gleichzeitiger Upload den Editor dazwischen
         // auf ein anderes Dokument umschaltet.
         let beforePdfs = null;
+        let beforeLogs = null;
         const started = await new Promise((resolve) => {
             uploadQueue = uploadQueue.then(async () => {
                 // Zieldokument im Editor öffnen, damit TeXlyre auch wirklich dieses kompiliert
@@ -2629,8 +2683,18 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                     }
                 }
 
+                // Hauptdokument im Kompilier-Dropdown festlegen – sonst nimmt TeXlyre
+                // ein im Browserprofil gemerktes Dokument statt des geöffneten.
+                const main = await page.evaluate((p) => window.__TLX.setMainFile(p), target);
+                if (!main.ok) {
+                    log('⚠️', '[PDF]', `Hauptdokument konnte nicht auf '${label}' gesetzt werden (${main.reason}).`, colors.yellow);
+                } else if (main.changed) {
+                    log('🎯', '[PDF]', `Hauptdokument von '${main.before}' auf '${label}' umgestellt.`, colors.dim);
+                }
+
                 const before = await page.evaluate(() => window.__TLX.listOutputs());
                 beforePdfs = new Map(before.filter(f => f.path.endsWith('.pdf')).map(f => [f.path, f.lastModified]));
+                beforeLogs = new Map(before.filter(f => f.path.endsWith('.log')).map(f => [f.path, f.lastModified]));
 
                 const triggered = await page.evaluate(() => window.__TLX.triggerCompile());
                 if (!triggered) {
@@ -2657,6 +2721,8 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
         const startTime = Date.now();
         let freshPdf = null;
         let compileEndedAt = 0;
+        let sawBusy = false;
+        let retriggered = false;
 
         // Kurz warten, damit die Kompilierung überhaupt startet
         await new Promise(r => setTimeout(r, 1500));
@@ -2682,7 +2748,20 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                 break;
             }
 
-            if (!busy) {
+            // Erst als beendet werten, wenn die Kompilierung sichtbar lief oder ein
+            // neues Log geschrieben wurde: Beim ersten Lauf lädt TeXlyre die Engine,
+            // ohne dass der Button als beschäftigt gilt.
+            if (busy) sawBusy = true;
+            const newLog = outputs.some(f => f.path.endsWith('.log') &&
+                (beforeLogs.get(f.path) === undefined || f.lastModified > beforeLogs.get(f.path)));
+            // Direkt nach dem Umstellen des Hauptdokuments verpufft der erste Klick
+            // gelegentlich – dann einmal neu auslösen.
+            if (!sawBusy && !newLog && !retriggered && Date.now() - startTime > 20000) {
+                retriggered = true;
+                const again = await page.evaluate(() => window.__TLX.triggerCompile());
+                if (again) log('🔁', '[PDF]', 'Keine Kompilierung erkannt – löse erneut aus.', colors.dim);
+            }
+            if (!busy && (sawBusy || newLog)) {
                 if (compileEndedAt === 0) compileEndedAt = Date.now();
                 else if (Date.now() - compileEndedAt > graceAfterCompile) break;
             } else {
