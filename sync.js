@@ -252,7 +252,7 @@ if (args.includes('--auto-restart') && !process.env.TLX_SUPERVISED) {
                     process.exit(1);
                 }
                 const delay = Math.min(300, 30 * failedStarts);
-                log('🔁', '[NEUSTART]', `Start gescheitert (TeXlyre nicht geladen, evtl. noch kein Netz) – neuer Versuch in ${delay} s (${failedStarts}. Versuch).`, colors.yellow);
+                log('🔁', '[NEUSTART]', `Start gescheitert (Browser oder TeXlyre nicht bereit, z. B. kurz nach dem Aufwachen) – neuer Versuch in ${delay} s (${failedStarts}. Versuch).`, colors.yellow);
                 return restartLater(delay * 1000);
             }
             if (code !== EXIT_BROWSER_LOST) process.exit(code === null ? 1 : code);
@@ -1570,6 +1570,16 @@ Alternativ kannst du den Browser über Puppeteer nachladen mit:
     try {
         browser = await puppeteer.launch(launchOptions);
     } catch (err) {
+        // Unter --auto-restart: Startprobleme des Browsers sind meist vorübergehend
+        // (direkt nach dem Aufwachen aus dem Ruhezustand, verwaiste Prozesse mit
+        // gesperrtem Profil). Der Wächter räumt das Profil auf und versucht es
+        // später erneut. Nur ein fehlender Browser ist endgültig.
+        const browserMissing = /could not find chrome|executable doesn't exist/i.test(err.message) ||
+            (browserExecutable && !fs.existsSync(browserExecutable));
+        if (process.env.TLX_SUPERVISED && !browserMissing) {
+            log('⚠️', '[BROWSER]', `Browser-Start fehlgeschlagen (${err.message.split('\n')[0].trim()}) – neuer Versuch folgt.`, colors.yellow);
+            process.exit(EXIT_RETRY_LATER);
+        }
         if (/already running/i.test(err.message)) {
             log('❌', '[BROWSER]', 'Es läuft bereits ein Sync mit diesem Profil.', colors.red);
             console.log(`
