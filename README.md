@@ -1,6 +1,6 @@
 # TeXlyre Live-Sync Setup
 
-Dieses Projekt ermöglicht es dir, **in deinem bevorzugten lokalen Editor (z. B. VS Code inkl. Antigravity KI, Cursor, TeXstudio, Vim etc.) an LaTeX-Dateien zu arbeiten**, während deine Kollegen gleichzeitig **im Webbrowser über [TeXlyre](https://texlyre.org/texlyre)** am selben Dokument schreiben. 
+Dieses Projekt ermöglicht es dir, **in deinem bevorzugten lokalen Editor (z. B. VS Code inkl. Antigravity KI, Cursor, TeXstudio, Vim etc.) an LaTeX-Dateien zu arbeiten**, während deine Kollegen gleichzeitig **im Webbrowser über [TeXlyre](https://texlyre.github.io/texlyre)** am selben Dokument schreiben. 
 
 Ein Live-Sync-Skript synchronisiert alle Änderungen in Echtzeit über das WebRTC-Netzwerk von TeXlyre hin und her (Tastenanschlag für Tastenanschlag, wie in Google Docs).
 
@@ -19,11 +19,11 @@ Ein Live-Sync-Skript synchronisiert alle Änderungen in Echtzeit über das WebRT
 ## 🏁 Schnellstart-Anleitung (Schritt für Schritt)
 
 ### Schritt 1: Raum-ID in TeXlyre ermitteln
-1. Öffne deinen Webbrowser und gehe auf: **[https://texlyre.org/texlyre](https://texlyre.org/texlyre)**.
+1. Öffne deinen Webbrowser und gehe auf: **[https://texlyre.github.io/texlyre](https://texlyre.github.io/texlyre)** (früher texlyre.org, das inzwischen dorthin weiterleitet).
 2. Melde dich an oder klicke auf **„Try as Guest“** (Gast-Sitzung starten).
 3. Öffne oder erstelle dein gewünschtes LaTeX-Projekt.
 4. Schau in die Adresszeile deines Browsers:
-   * Die Webadresse lautet z. B.: `https://texlyre.org/texlyre/#yjs:e8092eef-926b-421b-8562-2a6683678bac`
+   * Die Webadresse lautet z. B.: `https://texlyre.github.io/texlyre/#yjs:e8092eef-926b-421b-8562-2a6683678bac`
    * Der Text hinter `#yjs:` ist deine **Raum-ID** (z. B. `e8092eef-926b-421b-8562-2a6683678bac`).
    * *(Diesen Link kannst du auch deinen Kollegen schicken, damit sie im Browser mitschreiben).*
 
@@ -87,9 +87,9 @@ TeXlyre unterscheidet zwischen **verknüpften Live-Dokumenten** und **statischen
 | Art | Erkennbar an | Sync-Richtung |
 | :--- | :--- | :--- |
 | **Live-Dokument** | Punkt-Symbol (•) im TeXlyre-Dateibaum | ⬌ **bidirektional** (Echtzeit in beide Richtungen) |
-| **Statische Datei** | kein Punkt-Symbol | ➡️ nur **TeXlyre → lokal** |
+| **Statische Datei** | kein Punkt-Symbol | ⬌ **bidirektional**, aber ohne Live-Editor: ein Upload ersetzt die ganze Datei |
 
-Möchtest du eine statische Datei auch lokal bearbeiten können, klicke in TeXlyre im Dateibaum neben der Datei auf **„Link Document“**. Danach ist sie bidirektional. Der Befehl `files` im Terminal zeigt dir jederzeit, welche Datei welchen Status hat.
+Statische Textdateien (z. B. eine hochgeladene `.bib`) kannst du lokal bearbeiten. Beim Speichern ersetzt der Sync den Inhalt in TeXlyre, Mitautoren bekommen ihn per Dateiabgleich. Arbeiten mehrere Personen gleichzeitig an der Datei, verknüpfe sie in TeXlyre über **„Link Document“**, dann laufen Änderungen live über den Editor. Der Befehl `files` im Terminal zeigt dir jederzeit, welche Datei welchen Status hat.
 
 > **Binärdateien** (Bilder, PDFs) werden von TeXlyre nach lokal übertragen. Geänderte Bilder lädst du bitte direkt in TeXlyre hoch.
 
@@ -114,6 +114,15 @@ new                          (Auswahlmenü aller lokalen Dateien, die es in TeXl
 🆕 [NEU] Lege 'kapitel1.tex' in TeXlyre an (mit dem lokalen Inhalt, 1.2 KB)...
 ✅ [NEU] 'kapitel1.tex' in TeXlyre angelegt und als Live-Dokument verknüpft (bidirektional).
 ```
+
+### Dateien löschen
+
+```
+rm kapitel1.tex
+rm -r kapitel            (Ordner samt Inhalt)
+```
+
+Die Datei verschwindet in TeXlyre (bei allen Mitautoren) und lokal. Die lokale Fassung wird vorher nach `output/_backup_…` gesichert. Live-Dokumente werden dafür automatisch entknüpft, die Rückfrage von TeXlyre bestätigt der Sync selbst.
 
 ---
 
@@ -216,6 +225,7 @@ Auch die laufenden Fehlermeldungen im Terminal und in `texlyre-errors.log` nenne
 | `node sync.js --delete-removed` | Löscht lokale Dateien, wenn sie in TeXlyre gelöscht wurden. |
 | `node sync.js --no-open` | Öffnet das PDF nach `print` nicht automatisch im Browser. |
 | `node sync.js --remote-poll=<ms>` | Abstand der Prüfung auf Änderungen in anderen Dateien (Standard: 1000). |
+| `node sync.js --auto-restart` | Startet den Sync automatisch neu, wenn die Verbindung zum Hintergrund-Browser abreißt (höchstens 10× pro Stunde). |
 | `node sync.js --help` | Zeigt alle verfügbaren Parameter und Hilfen an. |
 | `Strg + C` | Beendet den Live-Sync sauber und schließt den Browser. |
 
@@ -228,6 +238,7 @@ Auch die laufenden Fehlermeldungen im Terminal und in `texlyre-errors.log` nenne
 | `print <nr>` | Kompiliert Dokument Nr. `<nr>` aus der Auswahlliste (z. B. `print 2`). |
 | `new <datei>` / `neu` / `touch` | Legt die Datei in TeXlyre an und verknüpft sie als Live-Dokument (Ordner werden mit angelegt). |
 | `new` | Auswahlmenü der lokalen Dateien, die es in TeXlyre noch nicht gibt (oder neuen Namen eingeben). |
+| `rm <datei>` / `rm -r <ordner>` | Löscht in TeXlyre und lokal (lokal vorher gesichert). |
 | `files` / `f` / `ls` | Listet alle synchronisierten Dateien samt Sync-Richtung auf und markiert das aktuell geöffnete Dokument. |
 | `help` / `h` / `?` | Zeigt die verfügbaren interaktiven Befehle an. |
 
@@ -251,7 +262,16 @@ Beim Start gilt **TeXlyre als maßgeblich** (dort können Mitautoren gearbeitet 
 Der Ordner `output/` wird selbst nie synchronisiert – die Sicherung landet also nicht versehentlich in TeXlyre.
 
 ### Im Terminal steht „Upload abgebrochen“ – ist etwas kaputt?
-Nein, das ist das Sicherheitsnetz. Das Skript schreibt nur dann in ein Dokument, wenn im Web-Editor nachweislich das richtige und vollständig geladene Dokument geöffnet ist. Andernfalls verwirft es den Upload lieber, statt Text in die falsche Datei zu schreiben oder ihn zu verdoppeln. Deine nächste Speicherung überträgt die Änderung erneut.
+Nein, das ist das Sicherheitsnetz. Das Skript schreibt nur dann in ein Dokument, wenn im Web-Editor nachweislich das richtige und vollständig geladene Dokument geöffnet ist. Andernfalls verwirft es den Upload lieber, statt Text in die falsche Datei zu schreiben oder ihn zu verdoppeln, und versucht es kurz darauf automatisch erneut (bis zu sechsmal). Als übertragen (`📤 [Lokal]`) gilt eine Änderung erst, wenn TeXlyre sie in der Datei gespeichert hat.
+
+### Der Sync findet keine Dateien, obwohl das Projekt bei mir Dateien hat
+Der Sync-Browser hat einen eigenen Speicher und bekommt die Projektdateien per **Dateiabgleich** von den Mitautoren. Dafür muss bei mindestens einem Mitautor, der das Projekt geöffnet hat, in TeXlyre unter **Settings → Connectivity → File Synchronization** der Haken **„Enable file synchronization with peers“** gesetzt sein. Standard ist aus, und die Einstellung gilt pro Browser und Domain (nach dem Umzug von texlyre.org auf texlyre.github.io also neu setzen). Im Sync-Browser schaltet das Skript sie selbst ein. Beim Start wartet es bis zu 90 s auf die Dateien, danach kommen sie auch im laufenden Betrieb nach.
+
+### Warum heißt der Sync bei den Mitautoren „TeXlyre-Sync“?
+TeXlyre-Gastkonten laufen nach 24 h ab, und dabei löscht TeXlyre alle Projektdaten des Gasts. Der Sync wandelt seine Gast-Sitzung deshalb beim Start in ein dauerhaftes, rein lokales TeXlyre-Konto um (kein Server, nichts wird übertragen). Die Zugangsdaten stehen in `output/texlyre-konto.json`.
+
+### `print` kompiliert die falsche Datei
+TeXlyre ordnet das Hauptdokument nur über den Dateinamen zu. Gibt es mehrere Dateien mit demselben Namen (z. B. `main.tex` in mehreren Ordnern), kompiliert die Engine womöglich eine andere. Der Sync warnt dann vor dem Kompilieren. Abhilfe: dem Hauptdokument einen eindeutigen Namen geben.
 
 ### Ich sehe im Terminal einen Fehler beim Laden des Editors?
 Starte das Skript einmal mit dem Parameter `--visible`:
