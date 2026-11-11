@@ -211,6 +211,9 @@ ${colors.yellow}Beispiele:${colors.reset}
 // startet den eigentlichen Sync dann neu. Beim Neustart gilt wie immer:
 // TeXlyre hat Vorrang, abweichende lokale Fassungen landen vorher im Backup.
 const EXIT_BROWSER_LOST = 75;
+// Start gescheitert, vermutlich vorübergehend (z. B. Netz nach dem Aufwachen
+// aus dem Ruhezustand noch nicht da): später mit wachsendem Abstand erneut.
+const EXIT_RETRY_LATER = 76;
 
 /** Beendet Browser, die nach einem Absturz noch mit dem Sync-Profil laufen (sonst "already running"). */
 function killProfileBrowsers(profileDir) {
@@ -229,15 +232,31 @@ function killProfileBrowsers(profileDir) {
 
 if (args.includes('--auto-restart') && !process.env.TLX_SUPERVISED) {
     const childArgs = args.filter(a => a !== '--auto-restart');
-    const restarts = [];
+    const restarts = [];          // Zeitpunkte der Neustarts nach Verbindungsabbruch
+    let failedStarts = 0;         // gescheiterte Starts in Folge
     let current = null;
+    const restartLater = (delayMs) => setTimeout(() => {
+        killProfileBrowsers(path.join(__dirname, '.texlyre_profile'));
+        startChild();
+    }, delayMs);
     const startChild = () => {
         current = child_process.spawn(process.execPath, [__filename, ...childArgs], {
             stdio: 'inherit',
             env: { ...process.env, TLX_SUPERVISED: '1' }
         });
         current.on('exit', (code) => {
+            if (code === EXIT_RETRY_LATER) {
+                failedStarts++;
+                if (failedStarts > 12) {
+                    log('❌', '[NEUSTART]', '12 Startversuche in Folge gescheitert – gebe auf. Starte den Sync manuell neu.', colors.red);
+                    process.exit(1);
+                }
+                const delay = Math.min(300, 30 * failedStarts);
+                log('🔁', '[NEUSTART]', `Start gescheitert (TeXlyre nicht geladen, evtl. noch kein Netz) – neuer Versuch in ${delay} s (${failedStarts}. Versuch).`, colors.yellow);
+                return restartLater(delay * 1000);
+            }
             if (code !== EXIT_BROWSER_LOST) process.exit(code === null ? 1 : code);
+            failedStarts = 0;
             const now = Date.now();
             while (restarts.length && now - restarts[0] > 60 * 60 * 1000) restarts.shift();
             if (restarts.length >= 10) {
@@ -246,10 +265,7 @@ if (args.includes('--auto-restart') && !process.env.TLX_SUPERVISED) {
             }
             restarts.push(now);
             log('🔁', '[NEUSTART]', `Verbindung zum Browser verloren – starte den Sync in 5 s neu (${restarts.length}. Neustart in der letzten Stunde).`, colors.yellow);
-            setTimeout(() => {
-                killProfileBrowsers(path.join(__dirname, '.texlyre_profile'));
-                startChild();
-            }, 5000);
+            restartLater(5000);
         });
     };
     for (const sig of ['SIGINT', 'SIGTERM']) {
@@ -1860,7 +1876,7 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
             fs.writeFileSync(kontoPath, JSON.stringify({ username: result.name, password, createdAt: new Date().toISOString() }, null, 2));
             log('🔑', '[KONTO]', `Gast-Sitzung in dauerhaftes lokales TeXlyre-Konto '${result.name}' umgewandelt (Gäste laufen nach 24 h ab und verlieren dabei ihre Projektdaten). Zugangsdaten: output/texlyre-konto.json`, colors.green);
         } else if (!result.ok) {
-            log('⚠️', '[KONTO]', `Gast-Sitzung konnte nicht umgewandelt werden (${result.reason}). Gast-Sitzungen laufen nach 24 h ab.`, colors.yellow);
+            log('⚠️', '[KONTO]', `TeXlyre-Konto nicht prüfbar (${result.reason}). Falls der Sync als Gast läuft: Gast-Sitzungen laufen nach 24 h ab.`, colors.yellow);
         }
     } catch (e) {
         log('⚠️', '[KONTO]', `Konto nicht prüfbar (${e.message}).`, colors.yellow);
@@ -2030,8 +2046,14 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
             };
         }).catch(() => ({}));
 
-        log('❌', '[FEHLER]', 'Editor (.cm-content) konnte nach 30s nicht geladen werden!', colors.red);
         log('❌', '[FEHLER]', 'Editor (.cm-content) konnte nach 35s nicht geladen werden!', colors.red);
+
+        // Unter --auto-restart ist das meist vorübergehend (z. B. Netz nach dem
+        // Aufwachen aus dem Ruhezustand noch nicht da): später erneut versuchen.
+        if (process.env.TLX_SUPERVISED) {
+            await closeBrowser();
+            process.exit(EXIT_RETRY_LATER);
+        }
 
         if (pageState.hasProjectList || pageState.hasAllProjects || pageState.hasOpenButton) {
             console.log(`\n${colors.yellow}Die Seite zeigt die Projektliste ("${pageState.heading}") statt den Editor.`);
