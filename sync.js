@@ -194,6 +194,7 @@ ${colors.yellow}Optionen:${colors.reset}
   --debounce=<ms>      Wartezeit in ms nach lokalem Tastendruck vor Upload (Standard: 75)
   --poll=<ms>          Intervall in ms für das aktive Dokument (Standard: 100)
   --remote-poll=<ms>   Intervall in ms für alle übrigen Dateien (Standard: 1000)
+  --auto-restart       Sync automatisch neu starten, wenn die Verbindung zum Hintergrund-Browser abreißt
 
 ${colors.yellow}Beispiele:${colors.reset}
   node sync.js --room=e8092eef-926b-421b-8562-2a6683678bac
@@ -202,6 +203,63 @@ ${colors.yellow}Beispiele:${colors.reset}
 `);
         process.exit(0);
     }
+}
+
+// --- AUTOMATISCHER NEUSTART (--auto-restart) ---
+// Reißt die Verbindung zum Hintergrund-Browser ab, beendet sich der Sync mit
+// EXIT_BROWSER_LOST. Mit --auto-restart läuft dieser Prozess als Wächter und
+// startet den eigentlichen Sync dann neu. Beim Neustart gilt wie immer:
+// TeXlyre hat Vorrang, abweichende lokale Fassungen landen vorher im Backup.
+const EXIT_BROWSER_LOST = 75;
+
+/** Beendet Browser, die nach einem Absturz noch mit dem Sync-Profil laufen (sonst "already running"). */
+function killProfileBrowsers(profileDir) {
+    try {
+        if (process.platform === 'win32') {
+            const p = profileDir.replace(/'/g, "''");
+            child_process.execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+                `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${p}') } | ` +
+                'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
+            { stdio: 'ignore', timeout: 30000 });
+        } else {
+            child_process.execFileSync('pkill', ['-f', profileDir], { stdio: 'ignore' });
+        }
+    } catch (e) {}
+}
+
+if (args.includes('--auto-restart') && !process.env.TLX_SUPERVISED) {
+    const childArgs = args.filter(a => a !== '--auto-restart');
+    const restarts = [];
+    let current = null;
+    const startChild = () => {
+        current = child_process.spawn(process.execPath, [__filename, ...childArgs], {
+            stdio: 'inherit',
+            env: { ...process.env, TLX_SUPERVISED: '1' }
+        });
+        current.on('exit', (code) => {
+            if (code !== EXIT_BROWSER_LOST) process.exit(code === null ? 1 : code);
+            const now = Date.now();
+            while (restarts.length && now - restarts[0] > 60 * 60 * 1000) restarts.shift();
+            if (restarts.length >= 10) {
+                log('❌', '[NEUSTART]', '10 Neustarts innerhalb einer Stunde – gebe auf. Starte den Sync manuell neu.', colors.red);
+                process.exit(1);
+            }
+            restarts.push(now);
+            log('🔁', '[NEUSTART]', `Verbindung zum Browser verloren – starte den Sync in 5 s neu (${restarts.length}. Neustart in der letzten Stunde).`, colors.yellow);
+            setTimeout(() => {
+                killProfileBrowsers(path.join(__dirname, '.texlyre_profile'));
+                startChild();
+            }, 5000);
+        });
+    };
+    for (const sig of ['SIGINT', 'SIGTERM']) {
+        process.on(sig, () => {
+            if (current) try { current.kill(sig); } catch (e) {}
+            setTimeout(() => process.exit(0), 3000);
+        });
+    }
+    startChild();
+    return;   // Dieser Prozess ist nur der Wächter (CommonJS erlaubt return auf oberster Ebene)
 }
 
 // --- AUTOMATISCHE ERKENNUNG DER RAUM-ID ---
@@ -230,12 +288,12 @@ if (!roomId && !roomUrl) {
 ${colors.red}❌ Keine Raum-ID oder URL übergeben!${colors.reset}
 
 ${colors.yellow}So startest du den Live-Sync:${colors.reset}
-1. Öffne dein Dokument in TeXlyre (https://texlyre.org/texlyre)
-2. Kopiere die Webadresse aus der Browserzeile (z. B. https://texlyre.org/texlyre/#yjs:abc-123)
+1. Öffne dein Dokument in TeXlyre (https://texlyre.github.io/texlyre)
+2. Kopiere die Webadresse aus der Browserzeile (z. B. https://texlyre.github.io/texlyre/#yjs:abc-123)
 3. Führe folgenden Befehl im Terminal aus:
    ${colors.green}npm start -- --room=abc-123${colors.reset}
    ${colors.dim}oder${colors.reset}
-   ${colors.green}node sync.js --url=https://texlyre.org/texlyre/#yjs:abc-123${colors.reset}
+   ${colors.green}node sync.js --url=https://texlyre.github.io/texlyre/#yjs:abc-123${colors.reset}
 
 ${colors.cyan}Tipp: Mit '--visible' kannst du das Browserfenster live mitverfolgen:${colors.reset}
    ${colors.green}npm start -- --room=abc-123 --visible${colors.reset}
@@ -244,10 +302,17 @@ ${colors.cyan}Tipp: Mit '--visible' kannst du das Browserfenster live mitverfolg
 }
 
 // URL normalisieren
+// TeXlyre ist von texlyre.org nach texlyre.github.io umgezogen (texlyre.org
+// leitet seit November 2026 per 302 weiter). Direkt die neue Adresse nehmen.
+// Achtung: Browser-Speicher (Projektdateien, Einstellungen) hängt an der
+// Domain – unter der neuen Adresse beginnt der Sync-Browser mit leerem Speicher
+// und bekommt die Dateien per Dateiabgleich von den Mitautoren.
+const TEXLYRE_BASE = 'https://texlyre.github.io/texlyre/';
 let targetUrl = roomUrl;
 if (!targetUrl) {
-    targetUrl = `https://texlyre.org/texlyre/#yjs:${roomId}`;
+    targetUrl = `${TEXLYRE_BASE}#yjs:${roomId}`;
 } else {
+    targetUrl = targetUrl.replace(/^https?:\/\/(www\.)?texlyre\.org\/texlyre\/?/i, TEXLYRE_BASE);
     if (targetUrl.includes('texlyre.github.io') && !targetUrl.includes('/texlyre')) {
         targetUrl = targetUrl.replace('texlyre.github.io', 'texlyre.github.io/texlyre');
     }
@@ -549,6 +614,7 @@ const warnedOnce = new Set();
 const creatingPaths = new Map();
 
 let uploadQueue = Promise.resolve();   // Serialisiert Dokumentwechsel + Uploads
+let browserClosing = false;           // true = Browser wird absichtlich geschlossen
 
 function warnOnce(key, emoji, title, msg, color) {
     if (warnedOnce.has(key)) return;
@@ -923,7 +989,22 @@ function installPageLibrary(projectId) {
         }
     }
 
-    /** Öffnet die Datei mit dem gegebenen Pfad im Editor. */
+    /** Wartet bis zu ms Millisekunden, bis der Editor texPath zeigt. */
+    async function switchedTo(texPath, ms) {
+        const start = Date.now();
+        while (Date.now() - start < ms) {
+            if (activePath() === texPath) return true;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        return activePath() === texPath;
+    }
+
+    /**
+     * Öffnet die Datei mit dem gegebenen Pfad im Editor und meldet nur dann
+     * Erfolg, wenn der Editor wirklich gewechselt hat. Ist eine .bib geöffnet,
+     * zeigt TeXlyre den BibTeX-Viewer, und ein Klick im Dateibaum wechselt die
+     * Datei nicht – dann hilft der Klick auf den Tab der Zieldatei.
+     */
     async function selectFile(texPath) {
         if (activePath() === texPath) return { ok: true, via: 'already-active' };
 
@@ -933,10 +1014,20 @@ function installPageLibrary(projectId) {
         const el = findNodeElement(texPath);
         if (el) {
             el.click();
-            return { ok: true, via: 'click' };
+            if (await switchedTo(texPath, 1500)) return { ok: true, via: 'click' };
         }
 
-        // Strategie 2: onFileSelect direkt mit dem Datensatz aus IndexedDB aufrufen
+        // Strategie 2: Tab der Datei in der Tab-Leiste anklicken (falls schon offen)
+        const tab = Array.from(document.querySelectorAll('.editor-tab')).find(t => {
+            const title = t.querySelector('.tab-title');
+            return title && (title.textContent || '').trim() === texPath;
+        });
+        if (tab) {
+            tab.click();
+            if (await switchedTo(texPath, 1500)) return { ok: true, via: 'tab' };
+        }
+
+        // Strategie 3: onFileSelect direkt mit dem Datensatz aus IndexedDB aufrufen
         const onFileSelect = findTreeProp('onFileSelect');
         if (typeof onFileSelect === 'function') {
             const db = await openDb();
@@ -948,10 +1039,11 @@ function installPageLibrary(projectId) {
             const rec = matches.find(r => !r.isDeleted) || matches[0];
             if (rec) {
                 onFileSelect(rec);
-                return { ok: true, via: 'onFileSelect' };
+                if (await switchedTo(texPath, 2000)) return { ok: true, via: 'onFileSelect' };
             }
         }
-        return { ok: false, reason: 'not-found' };
+        if (!el && !tab) return { ok: false, reason: 'not-found' };
+        return { ok: false, reason: 'not-switched' };
     }
 
     // ---------- Dateien in TeXlyre anlegen ----------
@@ -1061,6 +1153,78 @@ function installPageLibrary(projectId) {
             linked: !!(after && after.documentId),
             documentId: (after && after.documentId) || null
         };
+    }
+
+    /**
+     * Schreibt Text direkt in eine NICHT verknüpfte Textdatei (z. B. eine
+     * hochgeladene .bib). Verknüpfte Dateien laufen weiter über den Editor,
+     * sonst überschreibt das Live-Dokument den Inhalt beim nächsten Speichern.
+     */
+    async function updateStaticFile(texPath, text) {
+        const api = fileTreeApi();
+        if (!api || typeof api.updateFileContent !== 'function') return { ok: false, reason: 'no-api' };
+        const rec = await activeRecord(texPath);
+        if (!rec) return { ok: false, reason: 'not-found' };
+        if (rec.documentId) return { ok: false, reason: 'linked' };
+        if (rec.isBinary) return { ok: false, reason: 'binary' };
+        await api.updateFileContent(rec.id, text);
+        const after = await readFile(texPath);
+        const ok = !!(after && after.kind === 'text' && norm(after.text) === norm(text));
+        return ok ? { ok: true } : { ok: false, reason: 'not-saved' };
+    }
+
+    /**
+     * Löscht eine Datei oder (mit recursive) einen Ordner in TeXlyre.
+     * Verknüpfte Dateien werden vorher entknüpft – TeXlyre löscht sonst keine
+     * Ordner mit Live-Dokumenten.
+     */
+    async function deletePath(texPath, recursive) {
+        const api = fileTreeApi();
+        if (!api || typeof api.batchDeleteFiles !== 'function') return { ok: false, reason: 'no-api' };
+        const rec = await activeRecord(texPath);
+        if (!rec) return { ok: false, reason: 'not-found' };
+        const all = await listFiles();
+        const inside = rec.type === 'directory'
+            ? all.filter(f => !f.isDeleted && f.path.startsWith(texPath + '/'))
+            : [];
+        if (rec.type === 'directory' && inside.length > 0 && !recursive) return { ok: false, reason: 'not-empty', count: inside.length };
+        const linked = [rec, ...inside].filter(f => f.documentId).map(f => f.id);
+        // Wird das gerade geöffnete Dokument entknüpft, lädt TeXlyre die Seite neu.
+        // Deshalb vorher auf eine Datei wechseln, die nicht gelöscht wird.
+        const doomed = new Set([texPath, ...inside.map(f => f.path)]);
+        if (doomed.has(activePath())) {
+            const other = all.find(f => !f.isDeleted && f.documentId && !doomed.has(f.path));
+            if (other) await selectFile(other.path);
+        }
+        // TeXlyre fragt vor dem Löschen bzw. Entknüpfen nach ("Confirm Deletion").
+        // Solange die Aktion läuft, nur diese Dialoge bestätigen.
+        let busy = true;
+        const confirmer = (async () => {
+            while (busy) {
+                for (const overlay of document.querySelectorAll('.modal-overlay')) {
+                    const text = overlay.innerText || '';
+                    if (!/confirm deletion|delete .*file|unlink/i.test(text)) continue;
+                    const btn = Array.from(overlay.querySelectorAll('button'))
+                        .find(b => /^(delete|unlink|confirm)/i.test((b.innerText || '').trim()));
+                    if (btn) btn.click();
+                }
+                await new Promise(r => setTimeout(r, 150));
+            }
+        })();
+        try {
+            if (linked.length && typeof api.batchUnlinkFiles === 'function') await api.batchUnlinkFiles(linked);
+            await api.batchDeleteFiles([rec.id]);
+        } finally {
+            busy = false;
+            await confirmer;
+        }
+        for (let i = 0; i < 30; i++) {
+            if (!(await activeRecord(texPath))) {
+                return { ok: true, removed: rec.type === 'directory' ? inside.filter(f => f.type !== 'directory').length : 1 };
+            }
+            await new Promise(r => setTimeout(r, 100));
+        }
+        return { ok: false, reason: 'still-there' };
     }
 
     /** Lässt TeXlyre den Editorinhalt sofort in die verknüpfte Datei speichern. */
@@ -1327,6 +1491,8 @@ function installPageLibrary(projectId) {
         selectFile: selectFile,
         createFile: createFile,
         saveLinkedDocument: saveLinkedDocument,
+        updateStaticFile: updateStaticFile,
+        deletePath: deletePath,
         writeToEditor: writeToEditor,
         triggerCompile: triggerCompile,
         compileTarget: compileTarget,
@@ -1406,13 +1572,24 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
         throw err;
     }
 
+    // Absichtliches Schließen (Strg+C, Startfehler) soll keinen Neustart auslösen
+    const closeBrowser = async () => {
+        browserClosing = true;
+        try { await browser.close(); } catch (e) {}
+    };
+
     browser.on('disconnected', () => {
+        if (browserClosing) return;
+        if (process.env.TLX_SUPERVISED && !isVisible) {
+            console.log(`\n${colors.yellow}🛑 Die Verbindung zum Hintergrund-Browser wurde unerwartet getrennt – der Sync wird neu gestartet.${colors.reset}`);
+            process.exit(EXIT_BROWSER_LOST);
+        }
         if (isVisible) {
             console.log(`\n${colors.yellow}🛑 Das Browser-Verbindungsfenster wurde geschlossen.${colors.reset}`);
             console.log(`${colors.cyan}💡 Tipp: Starte den Sync ohne '--visible' (z. B. 'npm start -- --room=...'), damit der Browser unsichtbar im Hintergrund läuft und die Verbindung stabil bleibt.${colors.reset}\n`);
         } else {
             console.log(`\n${colors.yellow}🛑 Die Verbindung zum Hintergrund-Browser wurde unerwartet getrennt.${colors.reset}`);
-            console.log(`${colors.cyan}💡 Tipp: Starte den Sync erneut mit 'npm start -- --room=${roomId || 'DEINE_ID'}'. Verwende '--visible' zur Diagnose, falls das Problem wiederholt auftritt.${colors.reset}\n`);
+            console.log(`${colors.cyan}💡 Tipp: Starte den Sync erneut mit 'npm start -- --room=${roomId || 'DEINE_ID'}'. Mit '--auto-restart' passiert das automatisch. Verwende '--visible' zur Diagnose, falls das Problem wiederholt auftritt.${colors.reset}\n`);
         }
         process.exit(0);
     });
@@ -1638,6 +1815,84 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
         }
     }
 
+    // --- Dauerhaftes lokales Konto statt Gast-Sitzung ---
+    // TeXlyre-Gastkonten laufen nach 24 h ab. Beim nächsten Laden löscht TeXlyre
+    // dann alle Projektdatenbanken des Gasts – der Sync-Browser stand danach mit
+    // leerem Projekt da, und jeder Neustart legte einen weiteren Gast an. Ein
+    // umgewandeltes Konto ist rein lokal (kein Server), läuft nicht ab und wird
+    // beim Laden ohne Passwort wiederhergestellt. Projekte und Einstellungen
+    // übernimmt TeXlyre beim Umwandeln.
+    try {
+        const kontoPath = path.join(__dirname, 'output', 'texlyre-konto.json');
+        let konto = null;
+        try { konto = JSON.parse(fs.readFileSync(kontoPath, 'utf8')); } catch (e) {}
+        const password = (konto && konto.password) || require('crypto').randomBytes(18).toString('base64url');
+        const result = await page.evaluate(async (baseName, pw) => {
+            const findAuth = () => {
+                for (const el of document.querySelectorAll('div, button, header')) {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+                    let f = key && el[key];
+                    for (let i = 0; i < 200 && f; i++, f = f.return) {
+                        const v = f.memoizedProps && f.memoizedProps.value;
+                        if (v && typeof v.upgradeGuestAccount === 'function' && typeof v.isGuestUser === 'function') return v;
+                    }
+                }
+                return null;
+            };
+            const auth = findAuth();
+            if (!auth) return { ok: false, reason: 'Anmeldung von TeXlyre nicht gefunden' };
+            if (!auth.isGuestUser()) return { ok: true, changed: false, name: auth.user && auth.user.username };
+            let lastError = '';
+            for (let i = 0; i < 5; i++) {
+                const name = i === 0 ? baseName : `${baseName}-${i + 1}`;
+                try {
+                    await auth.upgradeGuestAccount(name, pw);
+                    return { ok: true, changed: true, name };
+                } catch (e) {
+                    lastError = e && e.message || String(e);
+                    if (!/exist/i.test(lastError)) break;
+                }
+            }
+            return { ok: false, reason: lastError };
+        }, 'TeXlyre-Sync', password);
+        if (result.ok && result.changed) {
+            fs.mkdirSync(path.dirname(kontoPath), { recursive: true });
+            fs.writeFileSync(kontoPath, JSON.stringify({ username: result.name, password, createdAt: new Date().toISOString() }, null, 2));
+            log('🔑', '[KONTO]', `Gast-Sitzung in dauerhaftes lokales TeXlyre-Konto '${result.name}' umgewandelt (Gäste laufen nach 24 h ab und verlieren dabei ihre Projektdaten). Zugangsdaten: output/texlyre-konto.json`, colors.green);
+        } else if (!result.ok) {
+            log('⚠️', '[KONTO]', `Gast-Sitzung konnte nicht umgewandelt werden (${result.reason}). Gast-Sitzungen laufen nach 24 h ab.`, colors.yellow);
+        }
+    } catch (e) {
+        log('⚠️', '[KONTO]', `Konto nicht prüfbar (${e.message}).`, colors.yellow);
+    }
+
+    // --- Dateiabgleich mit Mitautoren sicherstellen ---
+    // Ohne "Enable file synchronization with peers" bekommt der Sync-Browser die
+    // Projektdateien nie (Standard in TeXlyre: aus). Die Einstellung gilt pro
+    // TeXlyre-Nutzer und Domain, ein frisches Profil oder ein Domainwechsel setzt
+    // sie also zurück. Deshalb hier selbst einschalten und die Seite neu laden.
+    try {
+        const fileSync = await page.evaluate(() => {
+            const user = localStorage.getItem('texlyre-current-user');
+            if (!user) return { ok: false, reason: 'kein TeXlyre-Nutzer' };
+            const key = 'texlyre-user-' + user + '-settings';
+            let settings = {};
+            try { settings = JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch (e) {}
+            if (settings['file-sync-enable'] === true) return { ok: true, changed: false };
+            settings['file-sync-enable'] = true;
+            localStorage.setItem(key, JSON.stringify(settings));
+            return { ok: true, changed: true };
+        });
+        if (fileSync.ok && fileSync.changed) {
+            log('🔄', '[DATEIABGLEICH]', 'Dateiabgleich mit Mitautoren war im Sync-Browser aus – eingeschaltet, lade TeXlyre neu...', colors.cyan);
+            await page.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+        } else if (!fileSync.ok) {
+            log('⚠️', '[DATEIABGLEICH]', `Einstellung nicht prüfbar (${fileSync.reason}).`, colors.yellow);
+        }
+    } catch (e) {
+        log('⚠️', '[DATEIABGLEICH]', `Einstellung nicht prüfbar (${e.message}).`, colors.yellow);
+    }
+
     // --- Warten auf CodeMirror Editor ---
     log('⏳', '[EDITOR]', 'Warte auf CodeMirror 6 Editor-Instanz...', colors.cyan);
     // Ein frisch angelegtes TeXlyre-Projekt hat noch keine Dateien und damit
@@ -1790,7 +2045,7 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
             console.log(`Starte das Skript mit ${colors.green}node sync.js --room=${roomId} --visible${colors.reset}`);
             console.log(`um im geöffneten Browserfenster zu sehen, woran TeXlyre hängen bleibt.\n`);
         }
-        await browser.close();
+        await closeBrowser();
         process.exit(1);
     }
 
@@ -1813,7 +2068,7 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
     const projectId = detectedProjectId || roomId;
     if (!projectId) {
         log('❌', '[PROJEKT]', 'Projekt-/Raum-ID konnte nicht ermittelt werden.', colors.red);
-        await browser.close();
+        await closeBrowser();
         process.exit(1);
     }
 
@@ -1837,7 +2092,7 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
     } catch (e) {
         log('❌', '[DATENBANK]', `Projekt-Datenbank nicht lesbar: ${e.message}`, colors.red);
         log('💡', '[TIPP]', 'Stimmt die Raum-ID? Öffne das Projekt einmal mit --visible im Browser.', colors.cyan);
-        await browser.close();
+        await closeBrowser();
         process.exit(1);
     }
 
@@ -1919,10 +2174,32 @@ ${colors.yellow}Tipp: Überprüfe deinen Browser oder installiere Google Chrome 
         return true;
     }
 
-    const initialList = await fetchRemoteList();
+    let initialList = await fetchRemoteList();
 
+    // Leeres Projekt beim Start: Meist ist der Sync-Browser nur noch nicht mit
+    // den Mitautoren abgeglichen (neues Profil, Domainwechsel). Die Dateien
+    // kommen per Dateiabgleich nach einigen Sekunden – darauf kurz warten,
+    // statt mit leerer Liste zu starten.
     if (initialList.length === 0) {
-        log('⚠️', '[ORDNER-SYNC]', 'Keine synchronisierbaren Dateien im TeXlyre-Projekt gefunden.', colors.yellow);
+        log('⏳', '[DATEIABGLEICH]', 'Noch keine Dateien in TeXlyre – warte bis zu 90 s auf den Abgleich mit den Mitautoren...', colors.cyan);
+        const waitStart = Date.now();
+        while (initialList.length === 0 && Date.now() - waitStart < 90000) {
+            await new Promise(r => setTimeout(r, 3000));
+            initialList = await fetchRemoteList().catch(() => []);
+        }
+        if (initialList.length > 0) {
+            // Kurz nachwarten, damit nicht nur die ersten Dateien eines Abgleichs zählen
+            let before = -1;
+            while (before !== initialList.length) {
+                before = initialList.length;
+                await new Promise(r => setTimeout(r, 3000));
+                initialList = await fetchRemoteList().catch(() => initialList);
+            }
+            log('📥', '[DATEIABGLEICH]', `${initialList.length} Dateien von den Mitautoren erhalten.`, colors.green);
+        } else {
+            log('⚠️', '[ORDNER-SYNC]', 'Keine synchronisierbaren Dateien im TeXlyre-Projekt gefunden.', colors.yellow);
+            log('💡', '[DATEIABGLEICH]', 'Falls das Projekt bei dir Dateien hat: In TeXlyre muss bei den Mitautoren unter Settings → Connectivity → File Synchronization „Enable file synchronization with peers“ eingeschaltet sein (Standard: aus; gilt pro Browser und Domain). Mindestens ein Mitautor mit den Dateien muss das Projekt geöffnet haben. Die Dateien kommen dann auch im laufenden Betrieb nach.', colors.cyan);
+        }
     }
 
     let pulledCount = 0;
@@ -2291,10 +2568,19 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
         }
 
         if (!target.documentId) {
-            warnOnce('static:' + texPath, '💡', '[STATISCHE DATEI]',
-                `'${texPath.replace(/^\//, '')}' ist in TeXlyre nicht als Live-Dokument verknüpft. Klicke dort auf "Link Document", damit lokale Änderungen hochgeladen werden.`,
-                colors.cyan);
-            return;
+            // Nicht verknüpfte Textdatei: Inhalt direkt im TeXlyre-Dateisystem
+            // ersetzen (kein Editor nötig). Mitautoren erhalten sie per Dateiabgleich.
+            lastLocalSave.set(texPath, Date.now());
+            lastSynced.set(texPath, newLocalContent);
+            const res = await page.evaluate((p, t) => window.__TLX.updateStaticFile(p, t), texPath, newLocalContent)
+                .catch((e) => ({ ok: false, reason: e.message }));
+            if (res.ok) {
+                log('📤', '[Lokal]', `${texPath.replace(/^\//, '')} (${formatSize(newLocalContent.length)}, nicht verknüpfte Datei)`, colors.cyan);
+                return 'ok';
+            }
+            lastSynced.delete(texPath);
+            log('⚠️', '[UPLOAD]', `'${texPath.replace(/^\//, '')}' (nicht verknüpft) konnte nicht gespeichert werden (${res.reason}).`, colors.yellow);
+            return 'retry';
         }
 
         // Richtiges Dokument im Editor öffnen
@@ -2330,6 +2616,16 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
         );
 
         if (result.ok) {
+            // Erst weitermachen, wenn TeXlyre den Stand wirklich in die Datei
+            // gespeichert hat. Sonst verwirft ein sofortiger Dokumentwechsel das
+            // verzögerte Auto-Speichern (Standard 1 s) und die Änderung fehlt
+            // beim Kompilieren und bei Mitautoren, die die Datei nicht offen haben.
+            const persisted = await confirmPersisted(texPath, target.documentId, newLocalContent);
+            if (!persisted) {
+                log('⚠️', '[UPLOAD]', `'${texPath.replace(/^\//, '')}' steht im Editor, ist in TeXlyre aber noch nicht gespeichert – neuer Versuch folgt.`, colors.yellow);
+                lastSynced.delete(texPath);
+                return 'retry';
+            }
             log('📤', '[Lokal]', `${texPath.replace(/^\//, '')} (${formatSize(newLocalContent.length)})`, colors.cyan);
             return 'ok';
         } else if (result.reason === 'wrong-document') {
@@ -2345,6 +2641,66 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             lastSynced.delete(texPath);
         }
         return 'retry';
+    }
+
+    /**
+     * Doppelter Inhalt: Treffen zwei Komplettstände eines Dokuments aufeinander
+     * (z. B. schnelle Uploads plus Abgleich mit Mitautoren), führt Yjs sie als
+     * zwei Einfügungen zusammen – der Text steht dann zweimal hintereinander.
+     * Erkennbar daran, dass der hochgeladene Text vollständig enthalten ist,
+     * das Dokument aber deutlich länger ist.
+     */
+    function looksDuplicated(docText, uploadedText) {
+        const doc = normalizeDoc(docText);
+        const up = normalizeDoc(uploadedText);
+        return up.length >= 20 && doc !== up && doc.length >= up.length * 1.5 && doc.includes(up);
+    }
+
+    /**
+     * Wartet, bis die verknüpfte Datei in TeXlyre den hochgeladenen Stand hat
+     * (löst dazu das Speichern selbst aus) und repariert dabei einen doppelten
+     * Inhalt. Gibt false zurück, wenn der Stand nach ~8 s nicht gespeichert ist.
+     */
+    async function confirmPersisted(texPath, documentId, text) {
+        const want = normalizeDoc(text);
+        let repaired = false;
+        let sawWant = false;   // stand der hochgeladene Text schon einmal im Editor?
+        for (let i = 0; i < 16; i++) {
+            if (i % 3 === 0 && documentId) {
+                await page.evaluate((id) => window.__TLX.saveLinkedDocument(id), documentId).catch(() => {});
+            }
+            await new Promise(r => setTimeout(r, 500));
+            const state = await page.evaluate(async (p) => {
+                const rec = await window.__TLX.readFile(p);
+                const bound = window.__TLX.boundPath();
+                return {
+                    stored: rec && rec.kind === 'text' ? rec.text : null,
+                    editor: bound === p ? window.__TLX.editorText() : null
+                };
+            }, texPath).catch(() => null);
+            if (!state) continue;
+            if (state.editor !== null && normalizeDoc(state.editor) === want) sawWant = true;
+
+            const dupEditor = state.editor !== null && looksDuplicated(state.editor, text);
+            const dupStored = state.stored !== null && looksDuplicated(state.stored, text);
+            if ((dupEditor || dupStored) && !repaired && state.editor !== null) {
+                repaired = true;
+                const fix = await page.evaluate((p, t) => window.__TLX.writeToEditor(p, t), texPath, text).catch(() => ({ ok: false }));
+                log(fix.ok ? '🩹' : '⚠️', '[REPARATUR]', fix.ok
+                    ? `'${docLabel(texPath)}' stand doppelt in TeXlyre – auf den hochgeladenen Stand zurückgesetzt.`
+                    : `'${docLabel(texPath)}' steht doppelt in TeXlyre, Reparatur fehlgeschlagen.`, fix.ok ? colors.yellow : colors.red);
+                continue;
+            }
+            if (state.stored !== null && normalizeDoc(state.stored) === want) return true;
+            // Ein Mitautor hat nach unserem Schreiben schon weitergetippt und TeXlyre
+            // hat diesen neueren Stand gespeichert: ebenfalls erledigt (ein erneuter
+            // Upload würde seine Änderung zurücksetzen).
+            if (sawWant && state.stored !== null && state.editor !== null && !dupEditor &&
+                normalizeDoc(state.editor) !== want && normalizeDoc(state.stored) === normalizeDoc(state.editor)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Fehlgeschlagene Uploads werden wiederholt – es gibt nicht immer ein "nächstes Speichern". */
@@ -2387,6 +2743,13 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
 
         const texPath = localPathToTexlyre(relPath);
         if (!isSyncableTexlyrePath(texPath)) return;
+
+        // fs.watch meldet auch Änderungen an Ordnern (z. B. wenn darin eine Datei
+        // gespeichert wird). Ordner werden nicht hochgeladen – vorher endete das
+        // in "EISDIR: illegal operation on a directory".
+        try {
+            if (fs.statSync(texlyrePathToLocal(texPath)).isDirectory()) return;
+        } catch (e) {}
 
         // Echte lokale Änderung (nicht das Echo eines Remote-Schreibvorgangs)?
         // Dann sofort sperren, damit TeXlyre sie nicht überschreibt, bevor der
@@ -2658,6 +3021,19 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
 
         log('🖨️', '[PDF]', `Kompiliere '${label}' und lade das PDF herunter...`, colors.cyan);
 
+        // TeXlyre ordnet das Hauptdokument nur über den Dateinamen zu: Gibt es
+        // mehrere Dateien mit demselben Namen (z. B. zwei main.tex in
+        // verschiedenen Ordnern), kompiliert die Engine womöglich die falsche.
+        try {
+            const base = path.posix.basename(target);
+            const sameName = (await fetchRemoteList())
+                .filter(f => !f.isBinary && f.path !== target && path.posix.basename(f.path) === base)
+                .map(f => docLabel(f.path));
+            if (sameName.length) {
+                log('⚠️', '[PDF]', `Achtung: '${base}' gibt es mehrfach (${sameName.join(', ')}). TeXlyre kann gleichnamige Hauptdateien nicht unterscheiden und kompiliert eventuell eine andere. Gib dem Hauptdokument einen eindeutigen Namen.`, colors.yellow);
+            }
+        } catch (e) {}
+
         // Dokumentwechsel + Kompilierstart über dieselbe Warteschlange wie die
         // Uploads, damit kein gleichzeitiger Upload den Editor dazwischen
         // auf ein anderes Dokument umschaltet.
@@ -2894,6 +3270,76 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
     }
 
     /**
+     * Löscht eine Datei (bzw. mit -r einen Ordner) in TeXlyre und lokal. Die
+     * lokale Fassung wird vorher in output/_backup_… gesichert.
+     */
+    async function doRemove(argStr) {
+        const parts = (argStr || '').split(/\s+/).filter(Boolean);
+        const recursive = parts.some(p => p === '-r' || p === '-rf' || p === '--recursive');
+        const target = parts.filter(p => !p.startsWith('-')).join(' ');
+        const texPath = normalizeNewPath(target);
+        if (!texPath) {
+            log('⚠️', '[LÖSCHEN]', 'Aufruf: rm <datei>  bzw.  rm -r <ordner>', colors.yellow);
+            return;
+        }
+        if (TEXLYRE_INTERNAL_PREFIXES.some(pre => (texPath + '/').startsWith(pre))) {
+            log('⚠️', '[LÖSCHEN]', `'${docLabel(texPath)}' ist ein interner TeXlyre-Ordner und wird nicht gelöscht.`, colors.yellow);
+            return;
+        }
+        const label = docLabel(texPath);
+        await new Promise((resolve) => {
+            uploadQueue = uploadQueue.then(async () => {
+                try {
+                    const runDelete = () => page.evaluate((p, r) => window.__TLX.deletePath(p, r), texPath, recursive);
+                    let res;
+                    try {
+                        res = await runDelete();
+                    } catch (err) {
+                        // Entknüpfen kann ein Neuladen von TeXlyre auslösen – dann
+                        // Bibliothek neu injizieren und den Rest erneut versuchen.
+                        if (!/context was destroyed|navigation|Target closed/i.test(err.message)) throw err;
+                        await new Promise(r => setTimeout(r, 4000));
+                        await ensurePageLibrary();
+                        res = await runDelete();
+                    }
+                    if (!res.ok) {
+                        const reasons = {
+                            'not-found': `'${label}' gibt es in TeXlyre nicht.`,
+                            'not-empty': `'${label}' ist ein Ordner mit ${res.count} Einträgen – zum Löschen samt Inhalt: rm -r ${label}`,
+                            'no-api': 'Die Datei-Funktionen von TeXlyre wurden nicht gefunden.',
+                            'still-there': `TeXlyre hat '${label}' nicht gelöscht.`
+                        };
+                        log('❌', '[LÖSCHEN]', reasons[res.reason] || `Löschen fehlgeschlagen (${res.reason}).`, colors.red);
+                        return;
+                    }
+                    // Lokal sichern und entfernen (sonst würde die Datei als "neu" gemeldet)
+                    const localPath = texlyrePathToLocal(texPath);
+                    if (fs.existsSync(localPath)) {
+                        const files = [];
+                        const walk = (abs, tp) => {
+                            if (fs.statSync(abs).isDirectory()) {
+                                for (const name of fs.readdirSync(abs)) walk(path.join(abs, name), tp + '/' + name);
+                            } else files.push([tp, abs]);
+                        };
+                        walk(localPath, texPath);
+                        for (const [tp, abs] of files) {
+                            backupLocalFile(tp, abs);
+                            lastSynced.delete(tp);
+                            remoteMeta.delete(tp);
+                        }
+                        fs.rmSync(localPath, { recursive: true, force: true });
+                    }
+                    log('🗑️', '[LÖSCHEN]', `'${label}' in TeXlyre gelöscht${res.removed > 1 ? ` (${res.removed} Dateien)` : ''}; lokale Fassung gesichert in ${path.relative(__dirname, backupDir)}.`, colors.green);
+                } catch (err) {
+                    log('❌', '[LÖSCHEN]', `${label}: ${err.message}`, colors.red);
+                } finally {
+                    resolve();
+                }
+            });
+        });
+    }
+
+    /**
      * Legt eine Datei in TeXlyre an. Existiert sie lokal bereits, wird ihr
      * Inhalt übernommen; sonst wird sie zusätzlich lokal (leer) angelegt.
      * Textdateien werden als Live-Dokument verknüpft (bidirektional).
@@ -2971,8 +3417,11 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                             ? await page.evaluate((p, t) => window.__TLX.writeToEditor(p, t), texPath, text)
                             : { ok: false, reason: 'not-ready' };
                         if (!write.ok) {
-                            log('⚠️', '[NEU]', `'${label}' ist angelegt und verknüpft, aber der lokale Inhalt konnte nicht übertragen werden (${write.reason}). Speichere die Datei in VS Code einmal neu, dann wird er hochgeladen.`, colors.yellow);
+                            // Nicht auf ein "nächstes Speichern" warten: den normalen
+                            // Upload (mit Wiederholungen) einplanen, sobald 'new' fertig ist.
+                            log('⚠️', '[NEU]', `'${label}' ist angelegt und verknüpft, der Inhalt ging aber noch nicht durch (${write.reason}) – wird automatisch erneut hochgeladen.`, colors.yellow);
                             lastSynced.set(texPath, '');
+                            setTimeout(() => scheduleUpload(texPath, 0), 2000);
                             return;
                         }
                         lastLocalSave.set(texPath, Date.now());
@@ -3075,6 +3524,18 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                 isPrintRunning = false;
             }
 
+        } else if (cmd === 'rm' || cmd === 'del' || cmd === 'delete') {
+            if (isNewRunning || isPrintRunning) {
+                log('⏳', '[LÖSCHEN]', 'Es läuft gerade ein anderer Befehl, bitte kurz warten...', colors.yellow);
+                return;
+            }
+            isNewRunning = true;
+            try {
+                await doRemove(cmdArg);
+            } finally {
+                isNewRunning = false;
+            }
+
         } else if (cmd === 'files' || cmd === 'f' || cmd === 'ls') {
             try {
                 const list = await fetchRemoteList();
@@ -3086,7 +3547,7 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
                         ? `${colors.yellow}nur TeXlyre -> lokal (Binärdatei)${colors.reset}`
                         : f.documentId
                             ? `${colors.green}bidirektional${colors.reset}`
-                            : `${colors.yellow}nur TeXlyre -> lokal (nicht verknüpft – "Link Document")${colors.reset}`;
+                            : `${colors.green}bidirektional${colors.reset} ${colors.dim}(nicht verknüpft: Uploads ersetzen die Datei, ohne Live-Editor)${colors.reset}`;
                     console.log(`  ${mark} ${f.path.replace(/^\//, '').padEnd(28)} ${formatSize(f.size).padStart(9)}  ${kind}`);
                 }
                 console.log(`${colors.dim}  ● = aktuell im TeXlyre-Editor geöffnet${colors.reset}\n`);
@@ -3101,6 +3562,7 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
             console.log(`  ${colors.green}print <nr>${colors.reset}         – Dokument Nr. <nr> aus der Auswahlliste kompilieren (z. B. ${colors.green}print 2${colors.reset})`);
             console.log(`  ${colors.green}new <datei>${colors.reset}        – Datei in TeXlyre anlegen (z. B. ${colors.green}new kapitel1.tex${colors.reset} oder ${colors.green}new kapitel/intro.tex${colors.reset})`);
             console.log(`  ${colors.green}new${colors.reset}                – Auswahl lokaler Dateien, die es in TeXlyre noch nicht gibt`);
+            console.log(`  ${colors.green}rm <datei>${colors.reset}         – Datei in TeXlyre und lokal löschen (lokal vorher gesichert); ${colors.green}rm -r <ordner>${colors.reset} für Ordner`);
             console.log(`  ${colors.green}files${colors.reset} / ${colors.green}f${colors.reset}   / ${colors.green}ls${colors.reset}  – Alle synchronisierten Dateien auflisten`);
             console.log(`  ${colors.green}help${colors.reset}  / ${colors.green}h${colors.reset}   / ${colors.green}?${colors.reset}   – Diese Hilfe anzeigen`);
             console.log(`  ${colors.green}Strg+C${colors.reset}             – Live-Sync beenden\n`);
@@ -3132,7 +3594,7 @@ ${colors.dim}Tipp: Zum Beenden drücke Strg + C im Terminal.${colors.reset}
     process.on('SIGINT', async () => {
         console.log(`\n${colors.yellow}🛑 Live-Sync wird beendet... Schließe Browser.${colors.reset}`);
         try {
-            await browser.close();
+            await closeBrowser();
         } catch (e) {}
         console.log(`${colors.green}✓ Auf Wiedersehen!${colors.reset}`);
         process.exit(0);
