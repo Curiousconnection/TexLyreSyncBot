@@ -118,7 +118,8 @@ const SCRIPT_OWNED_DIRS = [
     '.vscode',
     '.idea',
     '.texlyre_profile',
-    'output'
+    'output',
+    'sync-tools'
 ];
 
 const SCRIPT_OWNED_FILES = [

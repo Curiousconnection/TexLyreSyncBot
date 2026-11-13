@@ -4,7 +4,7 @@
   "description": "Echtzeit-Synchronisation des gesamten TeXlyre-Projektordners (WebRTC) mit einem lokalen LaTeX-Projekt",
   "main": "sync.js",
   "scripts": {
-    "start": "node sync.js",
+    "start": "node sync.js --auto-restart",
     "sync": "node sync.js",
     "sync:visible": "node sync.js --visible",
     "install:browser": "puppeteer browsers install chrome"

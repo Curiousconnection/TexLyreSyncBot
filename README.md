@@ -26,6 +26,7 @@ Ein Live-Sync-Skript synchronisiert alle Änderungen in Echtzeit über das WebRT
    * Die Webadresse lautet z. B.: `https://texlyre.github.io/texlyre/#yjs:e8092eef-926b-421b-8562-2a6683678bac`
    * Der Text hinter `#yjs:` ist deine **Raum-ID** (z. B. `e8092eef-926b-421b-8562-2a6683678bac`).
    * *(Diesen Link kannst du auch deinen Kollegen schicken, damit sie im Browser mitschreiben).*
+5. **Wichtig:** Schalte in TeXlyre unter **Settings → Connectivity → File Synchronization** den Haken **„Enable file synchronization with peers“** ein. Der Sync-Browser hat einen eigenen Speicher und bekommt die Projektdateien nur über diesen Dateiabgleich von dir und deinen Mitautoren. In TeXlyre ist er standardmäßig aus, und die Einstellung gilt pro Browser.
 
 ---
 
@@ -45,6 +46,8 @@ Starte den Sync mit deiner Raum-ID aus Schritt 1:
 npm start -- --room=DEINE_RAUM_ID
 ```
 *(Ersetze `DEINE_RAUM_ID` durch deine echte ID aus Schritt 1).*
+
+`npm start` startet den Sync mit `--auto-restart`: Reißt die Verbindung zum Hintergrund-Browser ab (z. B. nach dem Ruhezustand des Rechners), startet er sich selbst neu. Beim ersten Start wandelt er außerdem seine TeXlyre-Gast-Sitzung in ein dauerhaftes lokales Konto „TeXlyre-Sync“ um (siehe [Häufige Fragen](#-häufige-fragen--fehlerbehebung)).
 
 #### 💡 Tipp zur Sichtprüfung (`--visible`):
 Wenn du sehen möchtest, wie sich der Browser im Hintergrund verbindet und das Dokument öffnet, füge `--visible` an:
@@ -71,7 +74,7 @@ Synchronisiert wird **alles, was im TeXlyre-Projekt liegt** – mit dem jeweils 
 
 | Ordner | Dateien |
 | :--- | :--- |
-| `node_modules/`, `.git/`, `.vscode/`, `.idea/`, `.texlyre_profile*/` (auch Kopien wie `.texlyre_profile_backup/`), `output/` | `sync.js`, `headless-sync.js`, `package.json`, `package-lock.json`, `README.md`, `.gitignore` sowie alle `*.zip` und `*.log` |
+| `node_modules/`, `.git/`, `.vscode/`, `.idea/`, `.texlyre_profile*/` (auch Kopien wie `.texlyre_profile_backup/`), `output/`, `sync-tools/` | `sync.js`, `headless-sync.js`, `package.json`, `package-lock.json`, `README.md`, `.gitignore` sowie alle `*.zip` und `*.log` |
 
 Ebenfalls ausgenommen sind die TeXlyre-internen Ordner `/.texlyre_cache/` und `/.texlyre_src/` (LaTeX-Paket-Cache und Compiler-Zwischenprodukte).
 
@@ -136,11 +139,18 @@ Beim Start durchläuft das Skript mehrere automatische Verbindungskontrollen:
 | **2/4** | 🚀 `[BROWSER]` | Startet die Chromium-Instanz mit persistentem Profil (`.texlyre_profile`). |
 | **3/4** | 🌐 `[NAV]` | Öffnet den kollaborativen WebRTC-Raum. |
 | **4/4** | 🔐 `[AUTH]` | Erkennt Login-Dialoge und schaltet die Gast-Session automatisch frei. |
+| | 🔑 `[KONTO]` | Wandelt eine Gast-Sitzung einmalig in das dauerhafte lokale Konto „TeXlyre-Sync“ um. |
+| | 🔄 `[DATEIABGLEICH]` | Schaltet den Dateiabgleich im Sync-Browser ein, falls er aus ist. Ist das Projekt noch leer, wartet der Sync bis zu 90 s auf die Dateien der Mitautoren. |
 | **Bereit** | 🟢 `[EDITOR BEREIT]` | CodeMirror 6 wurde gefunden und die bidirektionale Verbindung steht. |
 
 ### Während des Betriebs:
 * 📥 `[Remote] 1.2 KB`: Änderungen von Mitautoren empfangen -> Lokale Datei aktualisiert (gedrosselt & kompakt).
-* 📤 `[Lokal] 1.2 KB`: Lokale Änderungen an TeXlyre übertragen -> Für Mitautoren live.
+* 📤 `[Lokal] 1.2 KB`: Lokale Änderung an TeXlyre übertragen **und dort gespeichert** -> Für Mitautoren live und beim Kompilieren dabei.
+* 🔀 `[DOKUMENT]`: Der Sync schaltet den Web-Editor auf die Datei um, die du gerade lokal geändert hast.
+* ⛔ `[SCHUTZ]` / ⚠️ `[UPLOAD] … neuer Versuch folgt`: Upload vorsichtshalber verworfen (Editor noch nicht bereit). Der Sync versucht es automatisch erneut.
+* 🛟 `[BACKUP]`: Eine abweichende lokale Fassung wurde vor dem Überschreiben nach `output/_backup_…` gesichert.
+* 🩹 `[REPARATUR]`: Der Inhalt einer Datei stand nach einem Upload doppelt in TeXlyre und wurde auf den hochgeladenen Stand zurückgesetzt.
+* 🔁 `[NEUSTART]`: Verbindung zum Hintergrund-Browser verloren oder Start gescheitert – der Sync startet sich selbst neu.
 * ❌ `[LATEX FEHLER] in '<dokument>'`: Prägnanter Fehlerfilter. Zeigt fehlerhafte Zeilen und Fehlermeldungen live im Terminal, jeweils mit dem betroffenen Dokument, und schreibt sie in `texlyre-errors.log`.
 * 🟢 `[LATEX OK] '<dokument>'`: Bestätigt, sobald die Fehler in diesem Dokument behoben sind und die Kompilierung sauber durchläuft.
 * ✨ `[DESIGN]`: Versteckt störende Autornamen-Badges über dem Text, behält jedoch die leuchtende Umrandung der Mitnutzer-Cursor bei.
@@ -173,7 +183,7 @@ Hat das Projekt mehrere `.tex`-Dateien, erscheint ein **Auswahlmenü**:
 * Hinweise neben den Einträgen: `● im Editor geöffnet`, `❌ hat LaTeX-Fehler`, `kein \documentclass` (eine Teildatei, die nur über `\input` eingebunden wird und allein nicht kompiliert).
 
 Danach:
-1. Öffnet das Skript das gewählte Dokument in TeXlyre, denn TeXlyre kompiliert immer das gerade geöffnete Dokument.
+1. Öffnet das Skript das gewählte Dokument in TeXlyre und stellt es im Kompilier-Menü als Hauptdokument („Main File“) ein. Gibt es mehrere Dateien mit diesem Namen (z. B. zwei `main.tex` in verschiedenen Ordnern), warnt es vorher: TeXlyre kann sie nicht unterscheiden.
 2. Es löst die Kompilierung aus und wartet, bis sie abgeschlossen ist.
 3. Es legt das PDF **unter dem Namen des gewählten Dokuments** zusammen mit dem LaTeX-Log in `output/` ab.
 4. Es öffnet das PDF automatisch in einem **neuen Fenster deines Browsers** (Chrome, Edge oder Brave mit deinem normalen Profil). Ohne einen solchen Browser öffnet sich der Standard-PDF-Betrachter des Systems. Abschalten lässt sich das mit `--no-open` beim Start.
@@ -217,7 +227,7 @@ Auch die laufenden Fehlermeldungen im Terminal und in `texlyre-errors.log` nenne
 
 | Befehl | Beschreibung |
 | :--- | :--- |
-| `npm start -- --room=<ID>` | Startet den Live-Sync im Hintergrund (Headless). |
+| `npm start -- --room=<ID>` | Startet den Live-Sync im Hintergrund (Headless) mit automatischem Neustart. |
 | `npm run sync:visible -- --room=<ID>` | Startet den Sync mit sichtbarem Browserfenster. |
 | `node sync.js --url=<URL>` | Startet den Sync direkt mit vollständiger URL. |
 | `node sync.js --file=kapitel1.tex` | Synchronisiert **nur** diese eine Datei statt des ganzen Ordners. |
@@ -225,7 +235,7 @@ Auch die laufenden Fehlermeldungen im Terminal und in `texlyre-errors.log` nenne
 | `node sync.js --delete-removed` | Löscht lokale Dateien, wenn sie in TeXlyre gelöscht wurden. |
 | `node sync.js --no-open` | Öffnet das PDF nach `print` nicht automatisch im Browser. |
 | `node sync.js --remote-poll=<ms>` | Abstand der Prüfung auf Änderungen in anderen Dateien (Standard: 1000). |
-| `node sync.js --auto-restart` | Startet den Sync automatisch neu, wenn die Verbindung zum Hintergrund-Browser abreißt (höchstens 10× pro Stunde). |
+| `node sync.js --auto-restart` | Startet den Sync automatisch neu, wenn die Verbindung zum Hintergrund-Browser abreißt (nach 5 s, höchstens 10× pro Stunde) oder der Start scheitert (nach 30 s, 60 s … höchstens 5 min, bis zu 12 Versuche). In `npm start` schon enthalten. |
 | `node sync.js --help` | Zeigt alle verfügbaren Parameter und Hilfen an. |
 | `Strg + C` | Beendet den Live-Sync sauber und schließt den Browser. |
 
@@ -273,6 +283,9 @@ TeXlyre-Gastkonten laufen nach 24 h ab, und dabei löscht TeXlyre alle Projektda
 ### `print` kompiliert die falsche Datei
 TeXlyre ordnet das Hauptdokument nur über den Dateinamen zu. Gibt es mehrere Dateien mit demselben Namen (z. B. `main.tex` in mehreren Ordnern), kompiliert die Engine womöglich eine andere. Der Sync warnt dann vor dem Kompilieren. Abhilfe: dem Hauptdokument einen eindeutigen Namen geben.
 
+### Nach dem Ruhezustand ist der Sync weg oder meldet einen Neustart
+Schläft der Rechner, reißt die Verbindung zum Hintergrund-Browser ab. Mit `--auto-restart` (in `npm start` enthalten) startet der Sync nach dem Aufwachen von selbst neu. Ist das Netz dann noch nicht da oder lässt sich der Browser noch nicht starten, versucht er es mit wachsendem Abstand erneut. Beim Neustart gilt wie immer: TeXlyre ist maßgeblich, abweichende lokale Fassungen landen vorher im Backup.
+
 ### Ich sehe im Terminal einen Fehler beim Laden des Editors?
 Starte das Skript einmal mit dem Parameter `--visible`:
 ```bash
@@ -280,6 +293,11 @@ node sync.js --room=DEINE_RAUM_ID --visible
 ```
 Dadurch öffnet sich das Chromium-Fenster und du kannst sehen, ob TeXlyre eventuell nach einem Login fragt oder eine Bestätigung erwartet. Nach einmaliger Anmeldung wird der Zustand im Ordner `.texlyre_profile` gespeichert.
 
+### Diagnose am laufenden Sync
+Zwei kleine Werkzeuge hängen sich an den Hintergrund-Browser eines laufenden Syncs, ohne ihn zu stören:
 
-Fixes needed: 
-Editor erkennt nicht und läd nicht dokumente hoch die neu sind, wechselt nicht zwischen dokumenten: muss sicher eingebaut werden und auch möglich sein in verschiedenen dokumenten zu schreiben und alles wird sauber übernommen. außerdem das in texlyre gespeicherte hat immer priorität wenn ein dokument neu gelinkt wird und es unterschiede hat. dann wird aber eine sicherheitskopie abgelegt in extra ordner
+```bash
+node sync-tools/diag.js <Projektordner>                    # Datenbanken, Einstellungen, Dateizahl
+node sync-tools/diag.js <Projektordner> "window.__TLX.activePath()"   # beliebigen Ausdruck in TeXlyre auswerten
+node sync-tools/stored.js <Projektordner> /kapitel1.tex     # gespeicherten TeXlyre-Stand mit der lokalen Datei vergleichen
+```

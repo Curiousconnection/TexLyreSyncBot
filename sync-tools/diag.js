@@ -1,6 +1,6 @@
 // Diagnose: verbindet sich mit dem laufenden Hintergrund-Browser eines Syncs (DevToolsActivePort im Profil)
 // und gibt Seitenzustand, IndexedDB-Datenbanken und Dateizahl je Projekt-DB aus.
-// Aufruf: node tools/diag.js <Projektordner> [js-ausdruck]
+// Aufruf: node sync-tools/diag.js <Projektordner> [js-ausdruck]
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', 'node_modules', 'puppeteer'));

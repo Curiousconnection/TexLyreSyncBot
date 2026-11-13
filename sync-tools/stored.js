@@ -1,6 +1,6 @@
 // Test-Hilfe: zeigt, was TeXlyre für die angegebenen Pfade gespeichert hat (Dateisystem in IndexedDB),
 // und vergleicht optional mit der lokalen Datei.
-// Aufruf: node tools/stored.js <Projektordner> /pfad/a.tex [/pfad/b.tex ...]
+// Aufruf: node sync-tools/stored.js <Projektordner> /pfad/a.tex [/pfad/b.tex ...]
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', 'node_modules', 'puppeteer'));
